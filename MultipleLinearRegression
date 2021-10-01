@@ -1,0 +1,115 @@
+# LOAD LIBARIES
+pacman::p_load(tidymodels,
+               tidyverse,
+               vip,
+               skimr,
+               corrr,
+               ggforce)
+
+# LOAD THE AMES HOUSING DATA
+data(ames)
+
+# SET THE SEED FOR REPRODUCIBILITY
+set.seed(1234)
+
+# CREATE A SPLIT OBJECT TO KEEP 25% FOR TESTING PURPOSES
+trainIndex <- initial_split(ames,
+                            prop = 0.75,
+                            strata = Sale_Price)
+
+# BUILD A TRAINING DATASET
+amesNotTesting <- trainIndex %>% 
+  training()
+
+# BUILD A TESTING DATASET
+amesTesting <- trainIndex %>% 
+  testing()
+
+# CREATE A DATA SET FOR THE PURPOSES OF MEASURING PERFORMANCE
+validationSet <- validation_split(amesNotTesting,
+                                  strata = Sale_Price,
+                                  prop = 0.8)
+
+
+# EXPLORATORY DATA ANALYSIS -----------------------------------------------
+
+# CREATE A BROAD OVERVIEW OF THE AMES DATA FRAME
+skim(amesNotTesting)
+
+# LOOK AT THE RELATIONSHIP OF LAT AND LONG ON SALE PRICE - NON-LINEAR
+amesNotTesting %>% 
+  dplyr::select(Sale_Price, Longitude, Latitude) %>% 
+  tidyr::pivot_longer(cols = c(Longitude, Latitude), 
+                      names_to = "predictor", values_to = "value") %>% 
+  ggplot(aes(x = value, Sale_Price)) + 
+  geom_point(alpha = .2) + 
+  geom_smooth(se = FALSE) + 
+  facet_wrap(~ predictor, scales = "free_x")
+
+# CREATE A CORRELATION PLOT OF NUMERIC VARIABLES
+amesNotTesting %>% 
+  select(where(is.numeric)) %>% 
+  drop_na() %>% 
+  correlate() %>% 
+  rearrange() %>% 
+  network_plot(colours = c("orange","white","midnightblue"))
+
+
+# DIMENSIONALITY REDUCTION ------------------------------------------------
+
+amesRecipe <- 
+  recipe(Sale_Price ~ ., data = amesNotTesting) %>% 
+  # CONVERT THE TARGET VARIABLE TO LOG SCALE
+  step_log(Sale_Price, base = 10) %>% 
+  # POOLS INFREQUENTLY OCCURING VALUES INTO AN 'OTHER' CATEGORY
+  step_other(Neighborhood, threshold = 0.1) %>%
+  # CONVERT A COLUMN WITH C LEVELS OF NOMINAL DATA INTO C-1 NUMERIC COLUMNS
+  step_dummy(all_nominal_predictors()) %>% 
+  # PERFORM YEO JOHNSON TRANSFORMATION TO MAKE SKEWED DISTRIBUTIONS MORE SYMETRICAL
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>%
+  # REMOVE PREDICTOR VARIABLES WITH LINEAR COMBINATIONS BETWEEN THEM
+  step_lincomb(all_numeric(), -all_outcomes()) %>% 
+  # REMOVE NUMERIC PREDICTOR COLUMNS THAT CONTAIN ONLY A SINGLE VALUE
+  step_zv(all_numeric_predictors()) %>% 
+  # NORMALISE NUMERIC COLUMNS TO HAVE S.D. OF 1 AND MEAN OF 0
+  step_normalize(all_numeric_predictors()) %>%
+  # CREATES NEW COLUMNS THAT ARE BASIS EXPANSIONS OF VARIABLES USING NATURAL SPLINES
+  step_ns(Longitude, Latitude)
+  
+
+rec_trained <- prep(amesRecipe)
+
+# Think of Prep() like fit() for a model
+# Think of bake() like predict() for a model
+
+# CREATE A HELPER FUNCTION
+plot_test_results <- function(recipe, dat = amesTesting) {
+  recipe %>% 
+    prep() %>% 
+    bake(new_data = dat) %>% 
+    ggplot() + 
+    ggforce::geom_autopoint(aes(color = Sale_Price), alpha = 0.4, size = 0.5) + 
+    geom_autodensity(alpha = 0.3) + 
+    facet_matrix(vars(-Sale_Price), layer.diag = 2) + 
+    scale_color_distiller(palette = "BuPu",direction = 1) +
+    labs(color = "Sales Price (log)")
+}
+
+# PRINCIPAL COMPONENT ANALYSIS
+rec_trained %>% 
+  step_pca(all_numeric_predictors(), num_comp = 4) %>% 
+  plot_test_results() + 
+  ggtitle("PCA")
+
+rec_trained %>% 
+  step_pca(all_numeric_predictors(), num_comp = 4) %>% 
+  prep() %>% 
+  tidy(number = 3) %>% 
+  filter(component %in% paste0("PA",1:4)) %>% 
+  group_by(component) %>% 
+  slice_max(abs(value), n = 5) %>% 
+  ungroup() %>% 
+  ggplot(aes(abs(value), terms), fill = value > 0) + 
+  geom_col(alpha = 0.8) +
+  facet_wrap(vars(component), scales = "free_y") + 
+  labs(x = "Contribution to Principal Component", y = NULL, fill = "Positive?")
